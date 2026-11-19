@@ -59,6 +59,32 @@ function mqttDataEndpoint(mqttEndpoint: string): string {
   return `https://${host}`;
 }
 
+function resolveAwsRegion(
+  context: IotContext,
+  session: Session,
+  fallback: string,
+): string {
+  // Найнадійніше — взяти AWS region прямо з реального MQTT endpoint,
+  // який TCL повернув через loadBalance.
+  const endpointMatch = context.endpoint.match(
+    /\.iot\.([a-z0-9-]+)\.amazonaws\.com/i,
+  );
+
+  if (endpointMatch?.[1]) {
+    return endpointMatch[1];
+  }
+
+  // Другий варіант — cloud region, отриманий для конкретного TCL акаунта.
+  const cloudRegion = String(session.cloudRegion || "").trim();
+
+  if (/^[a-z]{2}-[a-z]+-\d+$/.test(cloudRegion)) {
+    return cloudRegion;
+  }
+
+  // Лише якщо нічого не вдалося визначити.
+  return fallback;
+}
+
 export async function getIotContext(session: Session): Promise<IotContext> {
   if (ctx && Date.now() - ctx.at < CTX_TTL_MS) return ctx;
 
@@ -121,7 +147,8 @@ function iotClient(context: IotContext, region: string): IoTDataPlaneClient {
 export async function getDeviceShadow(session: Session, deviceId: string) {
   const cfg = loadConfig();
   const context = await getIotContext(session);
-  const client = iotClient(context, cfg.iot.region);
+  const region = resolveAwsRegion(context, session, cfg.iot.region);
+const client = iotClient(context, region);
   const out = await client.send(new GetThingShadowCommand({ thingName: deviceId }));
   const raw = out.payload ? JSON.parse(new TextDecoder().decode(out.payload)) : {};
   return raw as {
@@ -139,7 +166,8 @@ export async function updateDeviceShadow(
 ) {
   const cfg = loadConfig();
   const context = await getIotContext(session);
-  const client = iotClient(context, cfg.iot.region);
+  const region = resolveAwsRegion(context, session, cfg.iot.region);
+const client = iotClient(context, region);
   const payload = {
     state: { desired },
     clientToken: clientToken(),
