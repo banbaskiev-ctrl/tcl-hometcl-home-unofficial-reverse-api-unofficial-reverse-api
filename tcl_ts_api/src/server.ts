@@ -48,16 +48,31 @@ export function createServer() {
           }),
       },
       "/api/ac/status": {
-        GET: async () => {
-          try {
-            const session = await ensureSession();
-            const status = await getAcStatus(session);
-            return json({ ok: true, data: status });
-          } catch (e) {
-            return err(e instanceof Error ? e.message : String(e), 500);
-          }
+  GET: async () => {
+    try {
+      const session = await ensureSession();
+      const status = await getAcStatus(session);
+
+      return json({
+        ok: true,
+        data: status,
+      });
+    } catch (e: any) {
+      console.error("TCL AC STATUS ERROR:", e);
+
+      return json(
+        {
+          ok: false,
+          error: e?.message ?? String(e),
+          name: e?.name ?? null,
+          code: e?.code ?? e?.Code ?? null,
+          metadata: e?.$metadata ?? null,
         },
-      },
+        500,
+      );
+    }
+  },
+},
       "/api/ac/power": {
         POST: async (req) => {
           try {
