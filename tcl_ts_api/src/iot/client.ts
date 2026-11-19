@@ -3,6 +3,7 @@ import {
   IoTDataPlaneClient,
   PublishCommand,
 } from "@aws-sdk/client-iot-data-plane";
+
 import { APP_ENV } from "../env.ts";
 import { loadConfig, type AppConfig } from "../config.ts";
 import { clientToken, iotNonce, md5 } from "../util.ts";
@@ -29,12 +30,19 @@ type IotContext = {
 };
 
 let ctx: IotContext | null = null;
+
 const CTX_TTL_MS = 45 * 60 * 1000;
 
-function iotHeaders(cfg: AppConfig, ssoToken: string, accessToken = ""): Record<string, string> {
+function iotHeaders(
+  cfg: AppConfig,
+  ssoToken: string,
+  accessToken = "",
+): Record<string, string> {
   const env = APP_ENV.iot;
+
   const timestamp = String(Date.now());
   const nonce = iotNonce();
+
   return {
     Accept: "*/*",
     "Content-Type": "application/json",
@@ -55,17 +63,26 @@ function iotHeaders(cfg: AppConfig, ssoToken: string, accessToken = ""): Record<
 }
 
 function mqttDataEndpoint(mqttEndpoint: string): string {
-  const host = mqttEndpoint.replace(/^wss:\/\//, "").replace(/:\d+$/, "");
+  const host = mqttEndpoint
+    .replace(/^wss:\/\//, "")
+    .replace(/:\d+$/, "");
+
   return `https://${host}`;
 }
 
+/**
+ * Визначає AWS region з реального MQTT endpoint,
+ * який повертає TCL loadBalance.
+ *
+ * Приклад:
+ * xxxx-ats.iot.eu-central-1.amazonaws.com
+ * -> eu-central-1
+ */
 function resolveAwsRegion(
   context: IotContext,
   session: Session,
   fallback: string,
 ): string {
-  // Найнадійніше — взяти AWS region прямо з реального MQTT endpoint,
-  // який TCL повернув через loadBalance.
   const endpointMatch = context.endpoint.match(
     /\.iot\.([a-z0-9-]+)\.amazonaws\.com/i,
   );
@@ -74,79 +91,185 @@ function resolveAwsRegion(
     return endpointMatch[1];
   }
 
-  // Другий варіант — cloud region, отриманий для конкретного TCL акаунта.
-  const cloudRegion = String(session.cloudRegion || "").trim();
+  const cloudRegion = String(
+    session.cloudRegion || "",
+  ).trim();
 
   if (/^[a-z]{2}-[a-z]+-\d+$/.test(cloudRegion)) {
     return cloudRegion;
   }
 
-  // Лише якщо нічого не вдалося визначити.
   return fallback;
 }
 
-export async function getIotContext(session: Session): Promise<IotContext> {
-  if (ctx && Date.now() - ctx.at < CTX_TTL_MS) return ctx;
-
-  const cfg = loadConfig();
-  const lbRes = await fetch(`https://${cfg.iot.host}/v1/auth/service/loadBalance`, {
-    headers: iotHeaders(cfg, session.token),
-  });
-  if (!lbRes.ok) throw new Error(`loadBalance HTTP ${lbRes.status}`);
-  const lbPayload = (await lbRes.json()) as Record<string, unknown>;
-  if (lbPayload.code !== 200) throw new Error(`loadBalance: ${lbPayload.message ?? "failed"}`);
-
-  const data = (lbPayload.data ?? {}) as Record<string, unknown>;
-  const lb: LoadBalance = {
-    cognitoId: String(data.cognitoId ?? ""),
-    cognitoToken: String(data.cognitoToken ?? ""),
-    mqttEndpoint: String(data.mqttEndpoint ?? ""),
-    saasToken: String(data.saasToken ?? ""),
-  };
-  if (!lb.cognitoId || !lb.cognitoToken || !lb.mqttEndpoint) {
-    throw new Error("loadBalance: incomplete data");
+export async function getIotContext(
+  session: Session,
+): Promise<IotContext> {
+  if (ctx && Date.now() - ctx.at < CTX_TTL_MS) {
+    return ctx;
   }
 
-  const credRes = await fetch(`https://${cfg.iot.cognitoHost}/`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-amz-json-1.1",
-      "X-Amz-Target": "AWSCognitoIdentityService.GetCredentialsForIdentity",
+  const cfg = loadConfig();
+
+  const lbRes = await fetch(
+    `https://${cfg.iot.host}/v1/auth/service/loadBalance`,
+    {
+      headers: iotHeaders(
+        cfg,
+        session.token,
+      ),
     },
-    body: JSON.stringify({
-      IdentityId: lb.cognitoId,
-      Logins: { "cognito-identity.amazonaws.com": lb.cognitoToken },
-    }),
-  });
-  if (!credRes.ok) throw new Error(`Cognito HTTP ${credRes.status}`);
-  const credPayload = (await credRes.json()) as Record<string, unknown>;
-  const c = (credPayload.Credentials ?? {}) as Record<string, unknown>;
-  if (!c.AccessKeyId) throw new Error("Cognito: no credentials");
+  );
+
+  if (!lbRes.ok) {
+    throw new Error(
+      `loadBalance HTTP ${lbRes.status}`,
+    );
+  }
+
+  const lbPayload =
+    (await lbRes.json()) as Record<
+      string,
+      unknown
+    >;
+
+  if (lbPayload.code !== 200) {
+    throw new Error(
+      `loadBalance: ${
+        lbPayload.message ?? "failed"
+      }`,
+    );
+  }
+
+  const data =
+    (lbPayload.data ?? {}) as Record<
+      string,
+      unknown
+    >;
+
+  const lb: LoadBalance = {
+    cognitoId: String(
+      data.cognitoId ?? "",
+    ),
+    cognitoToken: String(
+      data.cognitoToken ?? "",
+    ),
+    mqttEndpoint: String(
+      data.mqttEndpoint ?? "",
+    ),
+    saasToken: String(
+      data.saasToken ?? "",
+    ),
+  };
+
+  if (
+    !lb.cognitoId ||
+    !lb.cognitoToken ||
+    !lb.mqttEndpoint
+  ) {
+    throw new Error(
+      "loadBalance: incomplete data",
+    );
+  }
+
+  const credRes = await fetch(
+    `https://${cfg.iot.cognitoHost}/`,
+    {
+      method: "POST",
+
+      headers: {
+        "Content-Type":
+          "application/x-amz-json-1.1",
+
+        "X-Amz-Target":
+          "AWSCognitoIdentityService.GetCredentialsForIdentity",
+      },
+
+      body: JSON.stringify({
+        IdentityId: lb.cognitoId,
+
+        Logins: {
+          "cognito-identity.amazonaws.com":
+            lb.cognitoToken,
+        },
+      }),
+    },
+  );
+
+  if (!credRes.ok) {
+    throw new Error(
+      `Cognito HTTP ${credRes.status}`,
+    );
+  }
+
+  const credPayload =
+    (await credRes.json()) as Record<
+      string,
+      unknown
+    >;
+
+  const c =
+    (credPayload.Credentials ??
+      {}) as Record<string, unknown>;
+
+  if (!c.AccessKeyId) {
+    throw new Error(
+      "Cognito: no credentials",
+    );
+  }
 
   ctx = {
     lb,
+
     creds: {
-      accessKeyId: String(c.AccessKeyId),
-      secretAccessKey: String(c.SecretKey),
-      sessionToken: String(c.SessionToken),
+      accessKeyId: String(
+        c.AccessKeyId,
+      ),
+
+      secretAccessKey: String(
+        c.SecretKey,
+      ),
+
+      sessionToken: String(
+        c.SessionToken,
+      ),
     },
-    endpoint: mqttDataEndpoint(lb.mqttEndpoint),
+
+    endpoint: mqttDataEndpoint(
+      lb.mqttEndpoint,
+    ),
+
     at: Date.now(),
   };
+
   return ctx;
 }
 
-function iotClient(context: IotContext, region: string): IoTDataPlaneClient {
+function iotClient(
+  context: IotContext,
+  region: string,
+): IoTDataPlaneClient {
   return new IoTDataPlaneClient({
     region,
+
     endpoint: context.endpoint,
+
     credentials: context.creds,
   });
 }
 
-export async function getDeviceShadow(session: Session, deviceId: string) {
+/**
+ * Тільки читає Device Shadow.
+ * Нічого в кондиціонері не змінює.
+ */
+export async function getDeviceShadow(
+  session: Session,
+  deviceId: string,
+) {
   const cfg = loadConfig();
-  const context = await getIotContext(session);
+
+  const context =
+    await getIotContext(session);
 
   const region = resolveAwsRegion(
     context,
@@ -154,7 +277,10 @@ export async function getDeviceShadow(session: Session, deviceId: string) {
     cfg.iot.region,
   );
 
-  const client = iotClient(context, region);
+  const client = iotClient(
+    context,
+    region,
+  );
 
   try {
     const out = await client.send(
@@ -164,69 +290,127 @@ export async function getDeviceShadow(session: Session, deviceId: string) {
     );
 
     const raw = out.payload
-      ? JSON.parse(new TextDecoder().decode(out.payload))
+      ? JSON.parse(
+          new TextDecoder().decode(
+            out.payload,
+          ),
+        )
       : {};
 
     return raw as {
       state?: {
-        reported?: Record<string, unknown>;
-        desired?: Record<string, unknown>;
+        reported?: Record<
+          string,
+          unknown
+        >;
+
+        desired?: Record<
+          string,
+          unknown
+        >;
       };
     };
   } catch (e: any) {
+    const diagnostic = {
+      stage: "GetThingShadow",
+
+      errorName:
+        e?.name ?? null,
+
+      errorMessage:
+        e?.message ?? String(e),
+
+      httpStatusCode:
+        e?.$metadata
+          ?.httpStatusCode ?? null,
+
+      requestId:
+        e?.$metadata
+          ?.requestId ?? null,
+
+      serverTimeUtc:
+        new Date().toISOString(),
+
+      deviceId,
+
+      region,
+
+      cloudRegion:
+        session.cloudRegion,
+
+      endpoint:
+        context.endpoint,
+
+      mqttEndpoint:
+        context.lb.mqttEndpoint,
+    };
+
+    console.error(
+      "TCL AWS IoT Shadow error:",
+      diagnostic,
+    );
+
     throw new Error(
-      JSON.stringify({
-        stage: "GetThingShadow",
-        errorName: e?.name ?? null,
-        httpStatusCode: e?.$metadata?.httpStatusCode ?? null,
-
-        serverTimeUtc: new Date().toISOString(),
-
-        deviceId,
-
-        region,
-        cloudRegion: session.cloudRegion,
-
-        endpoint: context.endpoint,
-        mqttEndpoint: context.lb.mqttEndpoint,
-      }),
+      JSON.stringify(diagnostic),
     );
   }
-} {
-  const cfg = loadConfig();
-  const context = await getIotContext(session);
-  const region = resolveAwsRegion(context, session, cfg.iot.region);
-const client = iotClient(context, region);
-  const out = await client.send(new GetThingShadowCommand({ thingName: deviceId }));
-  const raw = out.payload ? JSON.parse(new TextDecoder().decode(out.payload)) : {};
-  return raw as {
-    state?: {
-      reported?: Record<string, unknown>;
-      desired?: Record<string, unknown>;
-    };
-  };
 }
 
+/**
+ * Записує Device Shadow.
+ * Цю функцію зараз наша діагностика НЕ викликає.
+ */
 export async function updateDeviceShadow(
   session: Session,
   deviceId: string,
-  desired: Record<string, unknown>,
+  desired: Record<
+    string,
+    unknown
+  >,
 ) {
   const cfg = loadConfig();
-  const context = await getIotContext(session);
-  const region = resolveAwsRegion(context, session, cfg.iot.region);
-const client = iotClient(context, region);
+
+  const context =
+    await getIotContext(session);
+
+  const region = resolveAwsRegion(
+    context,
+    session,
+    cfg.iot.region,
+  );
+
+  const client = iotClient(
+    context,
+    region,
+  );
+
   const payload = {
-    state: { desired },
-    clientToken: clientToken(),
+    state: {
+      desired,
+    },
+
+    clientToken:
+      clientToken(),
   };
-  const topic = `$aws/things/${deviceId}/shadow/update`;
+
+  const topic =
+    `$aws/things/${deviceId}` +
+    `/shadow/update`;
+
   await client.send(
     new PublishCommand({
       topic,
       qos: 1,
-      payload: new TextEncoder().encode(JSON.stringify(payload)),
+
+      payload:
+        new TextEncoder().encode(
+          JSON.stringify(payload),
+        ),
     }),
   );
-  return { topic, payload };
+
+  return {
+    topic,
+    payload,
+  };
 }
