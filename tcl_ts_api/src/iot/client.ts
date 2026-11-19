@@ -147,6 +147,54 @@ function iotClient(context: IotContext, region: string): IoTDataPlaneClient {
 export async function getDeviceShadow(session: Session, deviceId: string) {
   const cfg = loadConfig();
   const context = await getIotContext(session);
+
+  const region = resolveAwsRegion(
+    context,
+    session,
+    cfg.iot.region,
+  );
+
+  const client = iotClient(context, region);
+
+  try {
+    const out = await client.send(
+      new GetThingShadowCommand({
+        thingName: deviceId,
+      }),
+    );
+
+    const raw = out.payload
+      ? JSON.parse(new TextDecoder().decode(out.payload))
+      : {};
+
+    return raw as {
+      state?: {
+        reported?: Record<string, unknown>;
+        desired?: Record<string, unknown>;
+      };
+    };
+  } catch (e: any) {
+    throw new Error(
+      JSON.stringify({
+        stage: "GetThingShadow",
+        errorName: e?.name ?? null,
+        httpStatusCode: e?.$metadata?.httpStatusCode ?? null,
+
+        serverTimeUtc: new Date().toISOString(),
+
+        deviceId,
+
+        region,
+        cloudRegion: session.cloudRegion,
+
+        endpoint: context.endpoint,
+        mqttEndpoint: context.lb.mqttEndpoint,
+      }),
+    );
+  }
+} {
+  const cfg = loadConfig();
+  const context = await getIotContext(session);
   const region = resolveAwsRegion(context, session, cfg.iot.region);
 const client = iotClient(context, region);
   const out = await client.send(new GetThingShadowCommand({ thingName: deviceId }));
